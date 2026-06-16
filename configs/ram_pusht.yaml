@@ -1,0 +1,46 @@
+# RAM-style post-training defaults for lerobot/diffusion_pusht.
+
+policy_path: lerobot/diffusion_pusht
+env_type: pusht
+device: auto
+seed: 2000
+
+# Optimization
+lr: 1.0e-5
+weight_decay: 1.0e-4
+beta1: 0.9
+beta2: 0.99
+grad_clip_norm: 1.0
+reward_multiplier: 0.1
+
+# Sampling and RAM loss
+num_contexts_per_epoch: 16
+num_samples_per_context: 8
+num_loss_targets_per_sample: 4
+loss_batch_size: 32
+continuation_chunks: 2
+advantage_clip: 2.0
+max_action_clamp_fraction: 0.05
+
+# EMA copies
+ema_decay_old: 0.9
+ema_decay_eval: 0.95
+
+# Training schedule
+max_epochs: 30
+eval_every_epochs: 5
+save_every_epochs: 5
+resume: true
+
+# Evaluation during training
+eval_episodes: 50
+eval_seed: 1500
+eval_batch_size: 1
+render_eval_videos: 0
+
+# Regression guard against collapsing the pretrained policy.
+baseline_avg_max_reward: 0.9551318575760519
+baseline_pc_success: 65.4
+stop_regression_delta: 0.03
+stop_regression_patience: 2
+

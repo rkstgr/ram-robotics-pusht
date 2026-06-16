@@ -1,0 +1,29 @@
+[project]
+name = "ram-robotics-pusht"
+version = "0.1.0"
+description = "Quick visual milestone for RAM-style post-training on pretrained robot diffusion policies."
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+dependencies = [
+    "gym-pusht>=0.1.5",
+    "huggingface-hub>=0.23",
+    "imageio>=2.34",
+    "imageio-ffmpeg>=0.5",
+    "matplotlib>=3.8",
+    "numpy<2",
+    "pymunk<7",
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+lerobot = [
+    "lerobot",
+]
+
+[tool.uv]
+package = false
+
+[tool.setuptools]
+py-modules = []
