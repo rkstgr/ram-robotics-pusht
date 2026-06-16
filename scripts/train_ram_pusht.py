@@ -62,6 +62,7 @@ class RamTrainConfig:
     eval_every_epochs: int = 5
     save_every_epochs: int = 5
     resume: bool = True
+    checkpoint_enable: bool = True
 
     eval_episodes: int = 50
     eval_seed: int = 1500
@@ -212,6 +213,10 @@ def record_metrics(output_dir: Path, wandb_run: Any, record: dict[str, Any]) -> 
     log_wandb_metrics(wandb_run, record)
 
 
+def safe_rate(count: float, seconds: float) -> float:
+    return float(count / seconds) if seconds > 0 else 0.0
+
+
 def train_loss_epoch(
     *,
     train_policy,
@@ -284,6 +289,7 @@ def parse_args() -> tuple[argparse.Namespace, dict[str, Any]]:
 
 
 def main() -> None:
+    run_start = time.time()
     args, overrides = parse_args()
     config = load_config(args.config, overrides)
     output_dir = args.output_dir
@@ -297,11 +303,14 @@ def main() -> None:
     torch.manual_seed(config.seed)
 
     print(f"Loading {config.policy_path} on {device_name}")
+    load_start = time.time()
     train_policy = load_diffusion_policy(config.policy_path, device_name)
     ref_policy = copy.deepcopy(train_policy)
     old_policy = copy.deepcopy(train_policy)
     eval_policy = copy.deepcopy(train_policy)
+    load_policy_s = time.time() - load_start
 
+    setup_start = time.time()
     set_trainable_unet_only(train_policy)
     freeze_policy(ref_policy)
     freeze_policy(old_policy)
@@ -313,7 +322,9 @@ def main() -> None:
         betas=(config.beta1, config.beta2),
         weight_decay=config.weight_decay,
     )
+    setup_s = time.time() - setup_start
 
+    resume_start = time.time()
     start_epoch, best = maybe_resume(
         output_dir=output_dir,
         train_policy=train_policy,
@@ -321,22 +332,31 @@ def main() -> None:
         eval_policy=eval_policy,
         optimizer=optimizer,
         device=device_name,
-        resume=config.resume,
+        resume=config.resume and config.checkpoint_enable,
     )
+    if config.resume and not config.checkpoint_enable:
+        print("Checkpointing disabled; ignoring resume.")
+    resume_s = time.time() - resume_start
     bad_eval_count = 0
 
-    save_policy(eval_policy, output_dir / "latest")
-    if start_epoch == 0:
-        save_policy(eval_policy, output_dir / "initial")
+    initial_save_start = time.time()
+    if config.checkpoint_enable:
+        save_policy(eval_policy, output_dir / "latest")
+        if start_epoch == 0:
+            save_policy(eval_policy, output_dir / "initial")
+    initial_checkpoint_save_s = time.time() - initial_save_start
+    startup_s = time.time() - run_start
 
     for epoch in range(start_epoch, config.max_epochs):
         epoch_start = time.time()
         print(f"[epoch {epoch}] collecting contexts")
+        collect_start = time.time()
         contexts = collect_contexts(
             train_policy,
             num_contexts=config.num_contexts_per_epoch,
             seed=config.seed + epoch * 1000,
         )
+        context_collection_s = time.time() - collect_start
         print(f"[epoch {epoch}] scoring {len(contexts) * config.num_samples_per_context} candidates")
         candidates = score_candidate_batch(
             train_policy,
@@ -353,6 +373,7 @@ def main() -> None:
             )
 
         print(f"[epoch {epoch}] optimizing RAM loss")
+        train_start = time.time()
         train_metrics = train_loss_epoch(
             train_policy=train_policy,
             ref_policy=ref_policy,
@@ -362,13 +383,35 @@ def main() -> None:
             config=config,
             device=device,
         )
+        train_loss_s = time.time() - train_start
 
+        ema_start = time.time()
         ema_update_unet(train_policy, old_policy, config.ema_decay_old)
         ema_update_unet(train_policy, eval_policy, config.ema_decay_eval)
+        ema_update_s = time.time() - ema_start
+
+        candidate_count = int(candidates.x0.shape[0])
+        loss_target_count = candidate_count * config.num_loss_targets_per_sample
+        loss_batch_count = (loss_target_count + config.loss_batch_size - 1) // config.loss_batch_size
 
         record: dict[str, Any] = {
             "epoch": epoch,
-            "epoch_s": time.time() - epoch_start,
+            "startup_s": startup_s if epoch == start_epoch else 0.0,
+            "load_policy_s": load_policy_s if epoch == start_epoch else 0.0,
+            "setup_s": setup_s if epoch == start_epoch else 0.0,
+            "resume_s": resume_s if epoch == start_epoch else 0.0,
+            "initial_checkpoint_save_s": initial_checkpoint_save_s if epoch == start_epoch else 0.0,
+            "checkpoint_enable": config.checkpoint_enable,
+            "context_collection_s": context_collection_s,
+            "collected_context_count": len(contexts),
+            "train_loss_s": train_loss_s,
+            "train_loss_target_count": loss_target_count,
+            "train_loss_batch_count": loss_batch_count,
+            "ema_update_s": ema_update_s,
+            "epoch_compute_s": time.time() - epoch_start,
+            "speed_contexts_per_s": safe_rate(len(contexts), context_collection_s),
+            "speed_loss_targets_per_s": safe_rate(loss_target_count, train_loss_s),
+            "speed_loss_batches_per_s": safe_rate(loss_batch_count, train_loss_s),
             **candidates.stats,
             **{f"train_{key}": value for key, value in train_metrics.items()},
         }
@@ -392,11 +435,13 @@ def main() -> None:
             )
             agg = info["aggregated"]
             record.update({f"eval_{key}": value for key, value in agg.items()})
+            record["speed_eval_episodes_per_s"] = safe_rate(config.eval_episodes, float(agg["eval_s"]))
             avg_max = float(agg["avg_max_reward"])
             success = float(agg["pc_success"])
             if (avg_max, success) > (best["avg_max_reward"], best["pc_success"]):
                 best = {"avg_max_reward": avg_max, "pc_success": success, "epoch": epoch}
-                save_policy(eval_policy, output_dir / "best")
+                if config.checkpoint_enable:
+                    save_policy(eval_policy, output_dir / "best")
 
             if avg_max < config.baseline_avg_max_reward - config.stop_regression_delta:
                 bad_eval_count += 1
@@ -405,33 +450,47 @@ def main() -> None:
             if bad_eval_count >= config.stop_regression_patience:
                 record["stopped_reason"] = "validation_regression_guard"
                 record["best"] = best
+                checkpoint_start = time.time()
+                if config.checkpoint_enable:
+                    save_policy(eval_policy, output_dir / "latest")
+                    save_training_state(
+                        output_dir=output_dir,
+                        epoch=epoch,
+                        train_policy=train_policy,
+                        old_policy=old_policy,
+                        eval_policy=eval_policy,
+                        optimizer=optimizer,
+                        best=best,
+                    )
+                checkpoint_save_s = time.time() - checkpoint_start
+                record["checkpoint_save_s"] = checkpoint_save_s
+                record["epoch_s"] = time.time() - epoch_start
+                record["speed_epoch_candidates_per_s"] = safe_rate(candidate_count, record["epoch_s"])
+                record["speed_epoch_loss_targets_per_s"] = safe_rate(loss_target_count, record["epoch_s"])
                 record_metrics(output_dir, wandb_run, record)
-                save_policy(eval_policy, output_dir / "latest")
-                save_training_state(
-                    output_dir=output_dir,
-                    epoch=epoch,
-                    train_policy=train_policy,
-                    old_policy=old_policy,
-                    eval_policy=eval_policy,
-                    optimizer=optimizer,
-                    best=best,
-                )
                 print("Stopping early due to validation regression guard.")
                 break
 
-        if (epoch + 1) % config.save_every_epochs == 0 or epoch == config.max_epochs - 1:
-            save_policy(eval_policy, output_dir / f"epoch_{epoch:04d}")
-        save_policy(eval_policy, output_dir / "latest")
-        save_training_state(
-            output_dir=output_dir,
-            epoch=epoch,
-            train_policy=train_policy,
-            old_policy=old_policy,
-            eval_policy=eval_policy,
-            optimizer=optimizer,
-            best=best,
-        )
+        checkpoint_start = time.time()
+        if config.checkpoint_enable:
+            if (epoch + 1) % config.save_every_epochs == 0 or epoch == config.max_epochs - 1:
+                save_policy(eval_policy, output_dir / f"epoch_{epoch:04d}")
+            save_policy(eval_policy, output_dir / "latest")
+            save_training_state(
+                output_dir=output_dir,
+                epoch=epoch,
+                train_policy=train_policy,
+                old_policy=old_policy,
+                eval_policy=eval_policy,
+                optimizer=optimizer,
+                best=best,
+            )
+        checkpoint_save_s = time.time() - checkpoint_start
         record["best"] = best
+        record["checkpoint_save_s"] = checkpoint_save_s
+        record["epoch_s"] = time.time() - epoch_start
+        record["speed_epoch_candidates_per_s"] = safe_rate(candidate_count, record["epoch_s"])
+        record["speed_epoch_loss_targets_per_s"] = safe_rate(loss_target_count, record["epoch_s"])
         record_metrics(output_dir, wandb_run, record)
         print(f"[epoch {epoch}] loss={train_metrics['loss']:.6f} best={best}")
 

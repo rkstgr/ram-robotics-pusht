@@ -113,6 +113,22 @@ Useful W&B overrides:
 - `--wandb-tags smoke,mps` for comma-separated run tags
 - `--wandb-run-id <id>` to resume a specific W&B run
 
+The trainer logs timing and throughput metrics to both `metrics.jsonl` and W&B.
+Useful speed charts include:
+
+- `context_collection_s` and `speed_contexts_per_s`
+- `candidate_scoring_s`, `speed_candidates_per_s`, and `speed_candidate_env_steps_per_s`
+- `train_loss_s` and `speed_loss_targets_per_s`
+- `checkpoint_save_s`
+- `eval_s` and `speed_eval_episodes_per_s` when validation eval is enabled
+- `epoch_s`, `epoch_compute_s`, and `speed_epoch_candidates_per_s`
+
+For pure performance/smoke tests, pass `--checkpoint-enable false`. This still
+writes `config.yaml`, `metrics.jsonl`, W&B logs, and eval JSON files, but skips
+the large LeRobot checkpoint writes (`latest/`, `initial/`, `epoch_*`, `best/`,
+and `training_state.pt`). Runs with checkpointing disabled cannot resume or be
+reloaded for evaluation.
+
 ## Google Colab
 
 Use a GPU runtime: `Runtime -> Change runtime type -> Hardware accelerator -> GPU`.
@@ -181,6 +197,7 @@ Run a quick smoke train first:
   --continuation-chunks 1 \
   --eval-episodes 0 \
   --resume false \
+  --checkpoint-enable false \
   --wandb-enable true \
   --wandb-project ram-pusht \
   --wandb-run-name colab-smoke
@@ -234,7 +251,8 @@ Run a small smoke train:
   --loss-batch-size 2 \
   --continuation-chunks 1 \
   --eval-episodes 0 \
-  --resume false
+  --resume false \
+  --checkpoint-enable false
 ```
 
 Evaluate any saved checkpoint without videos:

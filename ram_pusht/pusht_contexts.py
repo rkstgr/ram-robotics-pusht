@@ -178,6 +178,8 @@ def collect_contexts(
                             step=step,
                         )
                     )
+                    if len(contexts) >= num_contexts:
+                        break
 
                 batch = {key: value.unsqueeze(0).to(device) for key, value in processed.items()}
                 action = policy.select_action(batch).squeeze(0).detach().cpu().numpy()
@@ -200,7 +202,7 @@ def _execute_actions(
     env: gym.Env,
     actions: Tensor,
     history: deque[dict[str, Tensor]],
-) -> tuple[float, bool, bool, int, int]:
+) -> tuple[float, bool, bool, int, int, int]:
     action_low = env.action_space.low
     action_high = env.action_space.high
     max_reward = 0.0
@@ -208,6 +210,7 @@ def _execute_actions(
     done = False
     clipped_values = 0
     total_values = 0
+    env_steps = 0
 
     for action_t in actions:
         raw = action_t.detach().cpu().numpy().astype(np.float64)
@@ -216,6 +219,7 @@ def _execute_actions(
         total_values += int(raw.size)
 
         observation, reward, terminated, truncated, info = env.step(clipped)
+        env_steps += 1
         max_reward = max(max_reward, float(reward))
         success = success or bool(info.get("is_success", False))
         done = bool(terminated or truncated)
@@ -223,7 +227,7 @@ def _execute_actions(
         if done:
             break
 
-    return max_reward, success, done, clipped_values, total_values
+    return max_reward, success, done, clipped_values, total_values, env_steps
 
 
 @torch.no_grad()
@@ -250,6 +254,8 @@ def score_candidate_batch(
     all_successes: list[float] = []
     clipped_values = 0
     total_values = 0
+    total_env_steps = 0
+    total_horizons_sampled = 0
     start_time = time.time()
 
     try:
@@ -260,6 +266,7 @@ def score_candidate_batch(
                 obs_batch,
                 samples_per_context=samples_per_context,
             )
+            total_horizons_sampled += int(horizons_norm.shape[0])
             horizons_env = unnormalize_action_horizons(policy, horizons_norm)
             action_start = policy.config.n_obs_steps - 1
             action_end = action_start + policy.config.n_action_steps
@@ -275,9 +282,10 @@ def score_candidate_batch(
                 done = False
 
                 first_actions = horizons_env[candidate_ix, action_start:action_end]
-                max_reward, success, done, cv, tv = _execute_actions(env, first_actions, history)
+                max_reward, success, done, cv, tv, env_steps = _execute_actions(env, first_actions, history)
                 clipped_values += cv
                 total_values += tv
+                total_env_steps += env_steps
                 candidate_max_reward = max(candidate_max_reward, max_reward)
                 candidate_success = candidate_success or success
 
@@ -292,11 +300,13 @@ def score_candidate_batch(
                     )
                     cont_batch = context_to_batch(continuation_context, device, batch_size=1)
                     cont_norm = sample_normalized_horizons(policy, cont_batch, samples_per_context=1)
+                    total_horizons_sampled += int(cont_norm.shape[0])
                     cont_env = unnormalize_action_horizons(policy, cont_norm)
                     cont_actions = cont_env[0, action_start:action_end]
-                    max_reward, success, done, cv, tv = _execute_actions(env, cont_actions, history)
+                    max_reward, success, done, cv, tv, env_steps = _execute_actions(env, cont_actions, history)
                     clipped_values += cv
                     total_values += tv
+                    total_env_steps += env_steps
                     candidate_max_reward = max(candidate_max_reward, max_reward)
                     candidate_success = candidate_success or success
 
@@ -318,7 +328,13 @@ def score_candidate_batch(
     obs_batch = collate_context_batches(all_contexts, device=torch.device("cpu"))
     x0 = torch.stack(all_x0, dim=0)
     clamp_fraction = float(clipped_values / total_values) if total_values else 0.0
+    scoring_s = time.time() - start_time
     stats = {
+        "candidate_context_count": len(contexts),
+        "candidate_count": len(all_scores),
+        "candidate_horizons_sampled": total_horizons_sampled,
+        "candidate_env_steps": total_env_steps,
+        "candidate_action_values": total_values,
         "candidate_score_mean": float(scores.mean()),
         "candidate_score_max": float(scores.max()),
         "candidate_success_rate": float(np.mean(all_successes) * 100.0) if all_successes else 0.0,
@@ -326,7 +342,12 @@ def score_candidate_batch(
         "candidate_epoch_std": float(epoch_std),
         "candidate_group_mean": float(group_means.mean()) if group_means.numel() else 0.0,
         "action_clamp_fraction": clamp_fraction,
-        "candidate_scoring_s": time.time() - start_time,
+        "candidate_scoring_s": scoring_s,
+        "speed_candidate_contexts_per_s": len(contexts) / scoring_s if scoring_s > 0 else 0.0,
+        "speed_candidates_per_s": len(all_scores) / scoring_s if scoring_s > 0 else 0.0,
+        "speed_candidate_horizons_per_s": total_horizons_sampled / scoring_s if scoring_s > 0 else 0.0,
+        "speed_candidate_env_steps_per_s": total_env_steps / scoring_s if scoring_s > 0 else 0.0,
+        "speed_candidate_action_values_per_s": total_values / scoring_s if scoring_s > 0 else 0.0,
     }
     return CandidateBatch(obs_batch=obs_batch, x0=x0, scores=scores, advantages=advantages, stats=stats)
 
