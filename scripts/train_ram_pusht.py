@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import copy
 import json
-import math
 import shutil
 import sys
 import time
@@ -31,6 +30,7 @@ from ram_pusht.ram_loss import (  # noqa: E402
     repeat_obs_batch,
     sample_weighted_timesteps,
 )
+from ram_pusht.wandb_logging import init_wandb, json_safe, log_wandb_metrics  # noqa: E402
 
 
 @dataclass
@@ -72,6 +72,16 @@ class RamTrainConfig:
     baseline_pc_success: float = 65.4
     stop_regression_delta: float = 0.03
     stop_regression_patience: int = 2
+
+    wandb_enable: bool = False
+    wandb_project: str = "ram-pusht"
+    wandb_entity: str | None = None
+    wandb_run_name: str | None = None
+    wandb_mode: str = "online"
+    wandb_tags: list[str] | str | None = None
+    wandb_run_id: str | None = None
+    wandb_resume: str = "allow"
+    wandb_save_code: bool = False
 
 
 def parse_overrides(extra_args: list[str]) -> dict[str, Any]:
@@ -193,19 +203,13 @@ def maybe_resume(
 
 
 def append_metrics(output_dir: Path, record: dict[str, Any]) -> None:
-    def json_safe(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {key: json_safe(item) for key, item in value.items()}
-        if isinstance(value, list):
-            return [json_safe(item) for item in value]
-        if isinstance(value, tuple):
-            return [json_safe(item) for item in value]
-        if isinstance(value, float) and not math.isfinite(value):
-            return None
-        return value
-
     with open(output_dir / "metrics.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(json_safe(record), allow_nan=False, sort_keys=True) + "\n")
+
+
+def record_metrics(output_dir: Path, wandb_run: Any, record: dict[str, Any]) -> None:
+    append_metrics(output_dir, record)
+    log_wandb_metrics(wandb_run, record)
 
 
 def train_loss_epoch(
@@ -286,6 +290,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     with open(output_dir / "config.yaml", "w", encoding="utf-8") as f:
         yaml.safe_dump(asdict(config), f, sort_keys=True)
+    wandb_run = init_wandb(config, output_dir)
 
     device_name = resolve_device(config.device)
     device = torch.device(device_name)
@@ -399,7 +404,8 @@ def main() -> None:
                 bad_eval_count = 0
             if bad_eval_count >= config.stop_regression_patience:
                 record["stopped_reason"] = "validation_regression_guard"
-                append_metrics(output_dir, record)
+                record["best"] = best
+                record_metrics(output_dir, wandb_run, record)
                 save_policy(eval_policy, output_dir / "latest")
                 save_training_state(
                     output_dir=output_dir,
@@ -426,8 +432,11 @@ def main() -> None:
             best=best,
         )
         record["best"] = best
-        append_metrics(output_dir, record)
+        record_metrics(output_dir, wandb_run, record)
         print(f"[epoch {epoch}] loss={train_metrics['loss']:.6f} best={best}")
+
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == "__main__":

@@ -44,3 +44,13 @@ baseline_pc_success: 65.4
 stop_regression_delta: 0.03
 stop_regression_patience: 2
 
+# Optional Weights & Biases logging. Enable with `--wandb-enable true`.
+wandb_enable: false
+wandb_project: ram-pusht
+wandb_entity:
+wandb_run_name:
+wandb_mode: online
+wandb_tags: []
+wandb_run_id:
+wandb_resume: allow
+wandb_save_code: false

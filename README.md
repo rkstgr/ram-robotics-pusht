@@ -92,6 +92,136 @@ Train with the default config:
   --output-dir outputs/ram_pusht/default
 ```
 
+Enable Weights & Biases logging by installing the optional tracking extra and
+passing the W&B switches as config overrides:
+
+```bash
+uv pip install -e ".[lerobot,tracking]"
+
+.venv/bin/python scripts/train_ram_pusht.py \
+  --config configs/ram_pusht.yaml \
+  --output-dir outputs/ram_pusht/default \
+  --wandb-enable true \
+  --wandb-project ram-pusht \
+  --wandb-run-name default
+```
+
+Useful W&B overrides:
+
+- `--wandb-mode offline` for local/offline runs
+- `--wandb-entity <entity>` for a team workspace
+- `--wandb-tags smoke,mps` for comma-separated run tags
+- `--wandb-run-id <id>` to resume a specific W&B run
+
+## Google Colab
+
+Use a GPU runtime: `Runtime -> Change runtime type -> Hardware accelerator -> GPU`.
+The free tier is often a T4; paid tiers may expose L4, A100, or other GPUs. This
+repo is tested with Python 3.10 and declares `python <3.12`, so the Colab setup
+below creates a local `uv` Python 3.10 environment instead of relying on Colab's
+base interpreter.
+
+Clone the repo. Replace the URL with the GitHub remote where this local repo has
+been pushed:
+
+```python
+!nvidia-smi
+!git clone https://github.com/<your-user-or-org>/ram-robotics-pusht.git
+%cd ram-robotics-pusht
+```
+
+Install dependencies in a project-local virtualenv:
+
+```python
+!pip -q install uv
+!uv venv --python 3.10
+!uv pip install -e ".[lerobot,tracking]"
+
+!.venv/bin/python - <<'PY'
+import torch
+print("torch", torch.__version__)
+print("cuda available", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("gpu", torch.cuda.get_device_name(0))
+PY
+```
+
+Persist checkpoints to Google Drive so interrupted Colab sessions can resume:
+
+```python
+from google.colab import drive
+drive.mount("/content/drive")
+
+!mkdir -p /content/drive/MyDrive/ram_pusht_runs
+```
+
+Log into W&B. If you use Colab secrets, store your key as `WANDB_API_KEY`; or run
+the login command interactively.
+
+```python
+# Option A: Colab secret named WANDB_API_KEY
+import os
+from google.colab import userdata
+os.environ["WANDB_API_KEY"] = userdata.get("WANDB_API_KEY")
+
+# Option B: interactive login
+# !.venv/bin/wandb login
+```
+
+Run a quick smoke train first:
+
+```python
+!.venv/bin/python scripts/train_ram_pusht.py \
+  --output-dir /content/drive/MyDrive/ram_pusht_runs/smoke_colab \
+  --max-epochs 1 \
+  --num-contexts-per-epoch 1 \
+  --num-samples-per-context 2 \
+  --num-loss-targets-per-sample 1 \
+  --loss-batch-size 2 \
+  --continuation-chunks 1 \
+  --eval-episodes 0 \
+  --resume false \
+  --wandb-enable true \
+  --wandb-project ram-pusht \
+  --wandb-run-name colab-smoke
+```
+
+Then run the default training config. Keeping `--output-dir` on Drive preserves
+`training_state.pt`, `latest/`, `best/`, and `wandb_run_id.txt`; rerunning the
+same command resumes from the latest saved epoch because `resume: true` is the
+default.
+
+```python
+!.venv/bin/python scripts/train_ram_pusht.py \
+  --config configs/ram_pusht.yaml \
+  --output-dir /content/drive/MyDrive/ram_pusht_runs/default \
+  --wandb-enable true \
+  --wandb-project ram-pusht \
+  --wandb-run-name colab-default
+```
+
+Evaluate a saved checkpoint without rendering videos:
+
+```python
+!.venv/bin/python scripts/evaluate_ram_pusht.py \
+  --policy.path /content/drive/MyDrive/ram_pusht_runs/default/latest \
+  --env.type pusht \
+  --episodes 100 \
+  --seed 1000 \
+  --batch-size 1 \
+  --render-videos 0 \
+  --output-dir /content/drive/MyDrive/ram_pusht_runs/default/eval_seed1000
+```
+
+Colab tips:
+
+- Prefer `--render-videos 0`; video rendering is slow and unnecessary for metrics.
+- Start with the smoke run to confirm CUDA, PushT, LeRobot, and W&B all work.
+- If Colab disconnects, reconnect, rerun the setup cells, and rerun the same
+  training command with the same Drive output directory.
+- If the GPU is a T4, expect the default run to be useful but slow; L4/A100
+  runtimes are better for the full validation/final eval loop.
+
 Run a small smoke train:
 
 ```bash

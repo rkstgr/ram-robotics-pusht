@@ -21,6 +21,9 @@ dependencies = [
 lerobot = [
     "lerobot",
 ]
+tracking = [
+    "wandb>=0.17",
+]
 
 [tool.uv]
 package = false
